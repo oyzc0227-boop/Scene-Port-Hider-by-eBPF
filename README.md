@@ -1,6 +1,6 @@
 # Scene Port Hider by eBPF
 
-这是一个 KernelSU 模块，用来隐藏 Scene 常用 TCP 端口 `8788` 和 `8765` 的端口探测。
+这是一个 KernelSU 模块，用来隐藏 Scene 常用 TCP 端口 `8788`、`8765`、`14731` 和 `14754` 的端口探测。
 
 模块使用 eBPF 在内核侧做端口行为隐藏，当前覆盖：
 
@@ -245,8 +245,8 @@ hideSceneport_module.zip
 su
 cat /data/adb/modules/hideSceneport/hideport.log
 ps -A | grep hideport
-iptables -S OUTPUT | grep -E "8765|8788"
-ip6tables -S OUTPUT | grep -E "8765|8788"
+iptables -S OUTPUT | grep -E "8765|8788|14731|14754"
+ip6tables -S OUTPUT | grep -E "8765|8788|14731|14754"
 exit
 ```
 
@@ -255,6 +255,8 @@ exit
 ```text
 hidden port: 8788
 hidden port: 8765
+hidden port: 14731
+hidden port: 14754
 allowed uid: 0
 allowed uid: 1000
 allowed uid: 2000
@@ -272,7 +274,7 @@ hideport cgroup-connect loaded
 
 `allowed uid` 的具体数字会因设备、用户空间和 Scene 安装方式不同而变化。关键是日志里应同时出现 Scene UI 的真实 UID 和 `scene-daemon` 所需 UID。
 
-同时 `iptables` / `ip6tables` 里不应该再出现本模块写入的 `8765`、`8788` 规则，Scene 应该可以正常打开。
+同时 `iptables` / `ip6tables` 里不应该再出现本模块写入的 `8765`、`8788`、`14731`、`14754` 规则，Scene 应该可以正常打开。
 
 ## 修改配置
 
@@ -280,7 +282,7 @@ hideport cgroup-connect loaded
 
 ```sh
 PKG=com.omarea.vtools
-PORTS="8788 8765"
+PORTS="8788 8765 14731 14754"
 ENABLE_EBPF=1
 EXTRA_ALLOWED_UIDS=""
 WAIT_FOR_UID_TIMEOUT=300
@@ -380,7 +382,7 @@ su -c 'for p in $(pidof hideport_loader); do kill "$p"; done'
 ```sh
 su -c 'cat /data/adb/modules/hideSceneport/hideport.log'
 su -c 'ps -A -o USER,PID,PPID,NAME,ARGS | grep -Ei "scene|omarea|vtools|hideport"'
-su -c 'ss -ltnp | grep -E "8765|8788"'
+su -c 'ss -ltnp | grep -E "8765|8788|14731|14754"'
 ```
 
 正常情况下，日志里的 `allowed uid` 应包含 Scene UI 进程对应的真实 UID。比如进程用户是 `u0_a384`，真实 UID 通常是 `10384`。
@@ -403,7 +405,7 @@ EXTRA_ALLOWED_UIDS="10384"
 
 不会。当前版本不使用 `iptables` / `ip6tables`，也不再打包 `service.d` 端口隐藏脚本。
 
-如果你看到 `8765`、`8788` 相关 iptables 规则，通常是旧版本残留或其他脚本写入。可以禁用旧模块并完整重启后再检查。
+如果你看到 `8765`、`8788`、`14731`、`14754` 相关 iptables 规则，通常是旧版本残留或其他脚本写入。可以禁用旧模块并完整重启后再检查。
 
 ### 安装时报 Kernel BTF mismatch 是什么？
 
