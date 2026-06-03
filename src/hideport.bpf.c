@@ -38,6 +38,7 @@ struct {
 struct bind_attempt_state {
     __s32 fd;
     __u16 port;
+    __u8 claim_created;
 };
 
 struct bind_rewrite_state {
@@ -66,16 +67,15 @@ struct {
 
 /*
  * Tracks live "claims" of a hidden port by a non-whitelisted task, keyed by
- * (tgid << 32 | net-order port). When such a task binds a hidden port we
- * rewrite the bind to an ephemeral port and record a claim here. A second
- * bind of the same hidden port by the same task while the claim is live is
- * denied, so two fds can never both appear to bind the same hidden port.
+ * (tgid << 32 | net-order port). The value is the pid_tgid that created the
+ * speculative claim, so bind failure cleanup can avoid deleting another
+ * racing thread's live claim.
  */
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 1024);
     __type(key, __u64);
-    __type(value, __u8);
+    __type(value, __u64);
 } bound_hidden_claims SEC(".maps");
 
 struct {
@@ -240,9 +240,11 @@ static __always_inline int hideport_maybe_rewrite_bind(struct bpf_sock_addr *ctx
 {
     __u16 port = (__u16)ctx->user_port;
     __u8 order = hideport_redirect_order(port);
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u64 claim_key;
-    __u8 *claimed;
-    __u8 one = 1;
+    __u64 owner;
+    __u64 *claimed;
+    struct bind_attempt_state *pending;
 
     if (!order)
         return 1;
@@ -255,16 +257,24 @@ static __always_inline int hideport_maybe_rewrite_bind(struct bpf_sock_addr *ctx
      * hidden port for both, an impossible result that fingerprints us.
      *
      * Track a per-task claim keyed by (tgid, net-order port). The first bind
-     * records the claim and is rewritten to an ephemeral port; a second bind
-     * of the same hidden port by the same task while the claim is live is
-     * rejected, matching the EADDRINUSE-style failure of a real kernel.
+     * records a speculative claim and is rewritten to an ephemeral port; a
+     * second bind of the same hidden port by the same task while the claim is
+     * live is rejected, matching the EADDRINUSE-style failure of a real kernel.
+     * If the rewritten bind later fails, hideport_bind_ret rolls back only if
+     * this bind attempt created the speculative claim. This avoids deleting a
+     * claim owned by an earlier successful bind from the same thread.
      */
     claim_key = make_claim_key(port);
     claimed = bpf_map_lookup_elem(&bound_hidden_claims, &claim_key);
     if (claimed)
         return 0;
 
-    bpf_map_update_elem(&bound_hidden_claims, &claim_key, &one, BPF_ANY);
+    owner = pid_tgid;
+    if (!bpf_map_update_elem(&bound_hidden_claims, &claim_key, &owner, BPF_ANY)) {
+        pending = bpf_map_lookup_elem(&pending_bind_attempts, &pid_tgid);
+        if (pending && pending->port == port)
+            pending->claim_created = 1;
+    }
     ctx->user_port = 0;
     return 1;
 }
@@ -373,16 +383,31 @@ int hideport_bind_ret(struct pt_regs *ctx)
 {
     __u64 key = bpf_get_current_pid_tgid();
     struct bind_attempt_state *state;
+    __s32 fd;
+    __u16 port;
+    __u8 claim_created;
+    long ret;
 
     state = bpf_map_lookup_elem(&pending_bind_attempts, &key);
     if (!state)
         return 0;
 
-    if (PT_REGS_RC(ctx) == 0) {
-        struct fd_port_key fd_key = make_fd_key(state->fd);
-        __u16 port = state->port;
+    fd = state->fd;
+    port = state->port;
+    claim_created = state->claim_created;
+    ret = PT_REGS_RC(ctx);
+
+    if (ret == 0) {
+        struct fd_port_key fd_key = make_fd_key(fd);
 
         bpf_map_update_elem(&fd_bound_ports, &fd_key, &port, BPF_ANY);
+    } else if (claim_created) {
+        __u64 claim_key = make_claim_key(port);
+        __u64 *owner;
+
+        owner = bpf_map_lookup_elem(&bound_hidden_claims, &claim_key);
+        if (owner && *owner == key)
+            bpf_map_delete_elem(&bound_hidden_claims, &claim_key);
     }
 
     bpf_map_delete_elem(&pending_bind_attempts, &key);
